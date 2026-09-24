@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="Karben233/bili-hardcore"
+# 打包发布时由 CI 替换为实际发布仓库，避免 fork 发布时拉错上游产物
+REPO="${BILIHARDCORE_REPO:-Karben233/bili-hardcore}"
 BINARY="bili-hardcore"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 

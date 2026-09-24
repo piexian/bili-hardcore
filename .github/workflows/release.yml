@@ -11,6 +11,8 @@ permissions:
 
 env:
   RUST_VERSION: "1.95"
+  # 下载链接跟随实际发布仓库，避免 fork 发布时指向上游而失效
+  REPO_URL: https://github.com/${{ github.repository }}
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -218,8 +220,9 @@ jobs:
           fi
 
           # Include install scripts
-          cp install.sh release-assets/install.sh
-          cp install.ps1 release-assets/install.ps1
+          # 仓库名在打包时注入，使一键安装指向本次发布所在的仓库
+          sed 's|^REPO=.*|REPO="${BILIHARDCORE_REPO:-'"${GITHUB_REPOSITORY}"'}"|' install.sh > release-assets/install.sh
+          sed 's|^\$REPO = .*|$REPO = "'"${GITHUB_REPOSITORY}"'"|' install.ps1 > release-assets/install.ps1
           chmod +x release-assets/install.sh
 
           # Generate checksums
@@ -265,25 +268,25 @@ jobs:
 
             | 平台 Platform | 文件 File |
             |---------------|-----------|
-            | **macOS** (Universal) | [darwin-universal.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-darwin-universal.tar.gz) |
-            | **macOS** (ARM64) | [darwin-arm64.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-darwin-arm64.tar.gz) |
-            | **macOS** (x64) | [darwin-x64.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-darwin-x64.tar.gz) |
-            | **Windows** (x64) | [windows-x64.zip](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-windows-x64.zip) |
-            | **Linux** (x64 musl) | [linux-x64-musl.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-x64-musl.tar.gz) |
-            | **Linux** (x64 glibc) | [linux-x64.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-x64.tar.gz) |
-            | **Linux** (ARM64 musl) | [linux-arm64-musl.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-arm64-musl.tar.gz) |
-            | **Linux** (ARM64 glibc) | [linux-arm64.tar.gz](https://github.com/Karben233/bili-hardcore/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-arm64.tar.gz) |
+            | **macOS** (Universal) | [darwin-universal.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-darwin-universal.tar.gz) |
+            | **macOS** (ARM64) | [darwin-arm64.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-darwin-arm64.tar.gz) |
+            | **macOS** (x64) | [darwin-x64.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-darwin-x64.tar.gz) |
+            | **Windows** (x64) | [windows-x64.zip](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-windows-x64.zip) |
+            | **Linux** (x64 musl) | [linux-x64-musl.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-x64-musl.tar.gz) |
+            | **Linux** (x64 glibc) | [linux-x64.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-x64.tar.gz) |
+            | **Linux** (ARM64 musl) | [linux-arm64-musl.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-arm64-musl.tar.gz) |
+            | **Linux** (ARM64 glibc) | [linux-arm64.tar.gz](${{ env.REPO_URL }}/releases/download/${{ github.ref_name }}/bili-hardcore-${{ github.ref_name }}-linux-arm64.tar.gz) |
 
             ## 🚀 快速安装 / Quick Install
 
             **macOS / Linux (one-liner):**
             ```bash
-            curl -fsSL https://github.com/Karben233/bili-hardcore/releases/latest/download/install.sh | bash
+            curl -fsSL ${{ env.REPO_URL }}/releases/latest/download/install.sh | bash
             ```
 
             **Windows (PowerShell):**
             ```powershell
-            irm https://github.com/Karben233/bili-hardcore/releases/latest/download/install.ps1 | iex
+            irm ${{ env.REPO_URL }}/releases/latest/download/install.ps1 | iex
             ```
 
             ## 💡 提示

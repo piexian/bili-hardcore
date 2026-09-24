@@ -1,7 +1,8 @@
 #Requires -Version 5.1
 $ErrorActionPreference = "Stop"
 
-$REPO = "Karben233/bili-hardcore"
+# 打包发布时由 CI 替换为实际发布仓库，避免 fork 发布时拉错上游产物
+$REPO = if ($env:BILIHARDCORE_REPO) { $env:BILIHARDCORE_REPO } else { "Karben233/bili-hardcore" }
 $BINARY = "bili-hardcore.exe"
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { "$env:LOCALAPPDATA\Programs\bili-hardcore" }
 
