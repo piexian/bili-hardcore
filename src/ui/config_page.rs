@@ -3,18 +3,18 @@ use crate::config;
 use ratatui::style::{Color, Modifier, Style};
 
 const LABELS: [&str; 3] = ["API URL", "模型名称", "API Key"];
-
 fn focus_index(focus: ConfigFocus) -> usize {
     match focus {
         ConfigFocus::BaseUrl => 0,
         ConfigFocus::Model => 1,
         ConfigFocus::ApiKey => 2,
-        ConfigFocus::ThinkingToggle => 3,
-        ConfigFocus::ThinkingEffort => 4,
-        ConfigFocus::FastModeToggle => 5,
-        ConfigFocus::SaveBtn => 6,
-        ConfigFocus::TemplateBtn => 7,
-        ConfigFocus::ResetBtn => 8,
+        ConfigFocus::Protocol => 3,
+        ConfigFocus::ThinkingToggle => 4,
+        ConfigFocus::ThinkingEffort => 5,
+        ConfigFocus::FastModeToggle => 6,
+        ConfigFocus::SaveBtn => 7,
+        ConfigFocus::TemplateBtn => 8,
+        ConfigFocus::ResetBtn => 9,
     }
 }
 
@@ -47,6 +47,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         return;
     }
 
+    // Model picker overlay
+    if app.model_picker_open {
+        draw_model_select(f, inner, app);
+        return;
+    }
+
     // Confirmation dialog overlay
     if app.config_confirm_reset {
         draw_reset_confirm(f, inner, app.config_reset_choice);
@@ -55,14 +61,15 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
 
     let focus = focus_index(app.cfg_focus);
     // JEV 直接返回选项概率分布，没有推理开关可调
-    let is_jev = crate::llm::is_jev_endpoint(&app.cfg_fields[0]);
-    let thinking_on = app.cfg_thinking && !is_jev;
+    let supports_thinking = crate::llm::supports_thinking(app.cfg_protocol);
+    let thinking_on = app.thinking_visible();
 
     let mut layout_constraints: Vec<Constraint> = vec![
         Constraint::Length(2), // header
         Constraint::Length(3), // BaseUrl
         Constraint::Length(3), // Model
         Constraint::Length(3), // ApiKey
+        Constraint::Length(3), // Protocol
         Constraint::Length(3), // Thinking toggle
     ];
     if thinking_on {
@@ -81,7 +88,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
     let effort_shift: usize = if thinking_on { 0 } else { 1 };
 
     f.render_widget(
-        Paragraph::new("请输入 API 配置信息")
+        Paragraph::new("请输入 API 配置信息（URL 写到版本段，如 https://api.openai.com/v1）")
             .style(Style::default().fg(Color::Yellow))
             .alignment(Alignment::Center),
         chunks[0],
@@ -121,8 +128,35 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         );
     }
 
-    // Thinking toggle (chunks[4])
-    let thinking_focused = app.cfg_focus == ConfigFocus::ThinkingToggle && !is_jev;
+    // Protocol selector (chunks[4])：同一基址可能对应多种协议，必须显式选择
+    let protocol_focused = app.cfg_focus == ConfigFocus::Protocol;
+    let protocol_border_color = if protocol_focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let protocol_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" 接口协议 ")
+        .style(Style::default().fg(protocol_border_color));
+    let protocol_inner = protocol_block.inner(chunks[4]);
+    f.render_widget(protocol_block, chunks[4]);
+
+    let protocol_text = format!(
+        "[ {} ]  ← → 切换",
+        app.cfg_protocol.display_name()
+    );
+    f.render_widget(
+        Paragraph::new(protocol_text).style(Style::default().fg(if protocol_focused {
+            Color::White
+        } else {
+            Color::DarkGray
+        })),
+        protocol_inner,
+    );
+
+    // Thinking toggle (chunks[5])
+    let thinking_focused = app.cfg_focus == ConfigFocus::ThinkingToggle && supports_thinking;
     let toggle_border_color = if thinking_focused {
         Color::Cyan
     } else {
@@ -132,10 +166,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .title(" 思考模式 ")
         .style(Style::default().fg(toggle_border_color));
-    let toggle_inner = toggle_block.inner(chunks[4]);
-    f.render_widget(toggle_block, chunks[4]);
+    let toggle_inner = toggle_block.inner(chunks[5]);
+    f.render_widget(toggle_block, chunks[5]);
 
-    let toggle_text = if is_jev {
+    let toggle_text = if !supports_thinking {
         "[ - ] JEV 为结构化决策模型，直接返回选项概率，无此开关".to_string()
     } else if app.cfg_thinking {
         "[✓] 开启 - 准确率高，速度慢".to_string()
@@ -152,7 +186,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         toggle_inner,
     );
 
-    // Thinking effort selector (chunks[5], only when thinking is ON)
+    // Thinking effort selector (chunks[6], only when thinking is ON)
     if thinking_on {
         let effort_focused = app.cfg_focus == ConfigFocus::ThinkingEffort;
         let effort_border_color = if effort_focused {
@@ -164,8 +198,8 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
             .borders(Borders::ALL)
             .title(" 思考强度 ")
             .style(Style::default().fg(effort_border_color));
-        let effort_inner = effort_block.inner(chunks[5]);
-        f.render_widget(effort_block, chunks[5]);
+        let effort_inner = effort_block.inner(chunks[6]);
+        f.render_widget(effort_block, chunks[6]);
 
         const EFFORTS: [&str; 3] = ["低", "高", "最大"];
         let effort_text = EFFORTS
@@ -197,7 +231,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
     } else {
         Color::DarkGray
     };
-    let fast_chunk = &chunks[6 - effort_shift];
+    let fast_chunk = &chunks[7 - effort_shift];
     let fast_block = Block::default()
         .borders(Borders::ALL)
         .title(" 快速模式 ")
@@ -236,7 +270,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         Paragraph::new(save_text)
             .style(save_style)
             .alignment(Alignment::Center),
-        chunks[7 - effort_shift],
+        chunks[8 - effort_shift],
     );
 
     // Template button
@@ -255,7 +289,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         Paragraph::new(tpl_text)
             .style(tpl_style)
             .alignment(Alignment::Center),
-        chunks[8 - effort_shift],
+        chunks[9 - effort_shift],
     );
 
     // Reset button
@@ -274,14 +308,151 @@ pub fn draw(f: &mut ratatui::Frame, app: &App) {
         Paragraph::new(reset_text)
             .style(reset_style)
             .alignment(Alignment::Center),
-        chunks[9 - effort_shift],
+        chunks[10 - effort_shift],
     );
 
     f.render_widget(
-        Paragraph::new("↑↓ 切换  Space 勾选  Enter 确认  ESC 返回")
+        Paragraph::new("↑↓ 切换  Space 勾选  Enter 确认  ESC 返回  (模型框 Enter 拉模型列表)")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
-        chunks[11 - effort_shift],
+        chunks[12 - effort_shift],
+    );
+}
+
+fn draw_model_select(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    use ratatui::{
+        layout::{Alignment, Constraint, Layout},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::Paragraph,
+    };
+
+    let outer = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // title
+        Constraint::Length(1), // search
+        Constraint::Min(1),    // list
+        Constraint::Length(1), // page indicator
+    ])
+    .split(outer[0]);
+
+    let filtered = app.filtered_models();
+    let title = format!(
+        " 选择模型 · {} ",
+        app.cfg_protocol.display_name()
+    );
+    f.render_widget(
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        chunks[0],
+    );
+
+    let search = if app.model_filter.is_empty() {
+        "搜索: 直接输入关键词过滤".to_string()
+    } else {
+        format!("搜索: {}_", app.model_filter)
+    };
+    f.render_widget(
+        Paragraph::new(search).style(Style::default().fg(Color::Yellow)),
+        chunks[1],
+    );
+
+    if app.models_loading {
+        f.render_widget(
+            Paragraph::new("正在拉取模型列表…").style(Style::default().fg(Color::DarkGray)),
+            chunks[2],
+        );
+    } else if let Some(error) = &app.models_error {
+        f.render_widget(
+            Paragraph::new(error.as_str())
+                .style(Style::default().fg(Color::Red))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            chunks[2],
+        );
+    } else if filtered.is_empty() {
+        let hint = if app.models.is_empty() {
+            "该服务没有返回任何模型"
+        } else {
+            "没有匹配的模型"
+        };
+        f.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+            chunks[2],
+        );
+    } else {
+        // 每页 20 个；终端不够高时只截取当前页能显示的行，光标跟着滚动。
+        let page_start = app.model_page() * App::MODELS_PER_PAGE;
+        let visible = chunks[2].height as usize;
+        let window_start = if app.model_cursor >= page_start + visible {
+            app.model_cursor + 1 - visible
+        } else {
+            page_start
+        };
+        let page_end = (page_start + App::MODELS_PER_PAGE).min(filtered.len());
+        for (row, index) in (window_start..page_end.min(window_start + visible)).enumerate() {
+            let model = filtered[index];
+            let is_sel = index == app.model_cursor;
+            let in_use = model.id == app.cfg_fields[1];
+            let dim = Style::default().fg(Color::DarkGray);
+            let mut spans = Vec::new();
+            if in_use {
+                spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
+            }
+            spans.push(Span::raw(format!(
+                "{}{}",
+                if is_sel { "[ " } else { "  " },
+                model.id
+            )));
+            if model.label != model.id {
+                spans.push(Span::styled(format!("  {}", model.label), dim));
+            }
+            if let Some(detail) = &model.detail {
+                // 描述可能很长，截断后由 Paragraph 按宽度再裁一次。
+                let short: String = detail.chars().take(60).collect();
+                spans.push(Span::styled(format!(" · {short}"), dim));
+            }
+            f.render_widget(
+                Paragraph::new(Line::from(spans)).style(
+                    Style::default()
+                        .fg(if is_sel { Color::Yellow } else { Color::White })
+                        .add_modifier(if is_sel {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                chunks[2].offset(ratatui::layout::Offset {
+                    x: 0,
+                    y: row as i32,
+                }),
+            );
+        }
+    }
+
+    let mut indicator = format!(
+        "第 {}/{} 页 · 共 {} 个",
+        if filtered.is_empty() { 0 } else { app.model_page() + 1 },
+        app.model_page_count(),
+        filtered.len()
+    );
+    if app.models_truncated {
+        indicator.push_str(" (仅显示前 200 个)");
+    }
+    f.render_widget(
+        Paragraph::new(indicator)
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        chunks[3],
+    );
+
+    f.render_widget(
+        Paragraph::new("↑↓ 选择  ←→ 翻页  输入过滤  Backspace 退格  Enter 确认  ESC 关闭")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        outer[1],
     );
 }
 

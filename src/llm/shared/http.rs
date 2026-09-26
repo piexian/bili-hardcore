@@ -9,10 +9,15 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const HTTP_TOTAL_TIMEOUT: Duration = Duration::from_secs(35 * 60);
 
 pub(crate) fn build_http_client() -> Client {
+    build_http_client_with(HTTP_READ_TIMEOUT, HTTP_TOTAL_TIMEOUT)
+}
+
+/// 非流式协议用更短的读写超时：拿到完整 JSON 就算完成，长挂没有意义。
+pub(crate) fn build_http_client_with(read: Duration, total: Duration) -> Client {
     Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        .read_timeout(HTTP_READ_TIMEOUT)
-        .timeout(HTTP_TOTAL_TIMEOUT)
+        .read_timeout(read)
+        .timeout(total)
         .build()
         .expect("创建 HTTP 客户端失败")
 }

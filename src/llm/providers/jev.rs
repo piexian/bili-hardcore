@@ -1,6 +1,11 @@
-use super::LlmChunk;
-use super::http::{HTTP_CONNECT_TIMEOUT, format_reqwest_error, safe_preview, send_error};
-use crate::config::OpenAiConfig;
+use crate::config::LlmConfig;
+use crate::llm::protocol::{Protocol, endpoint};
+use crate::llm::request::QuizRequest;
+use crate::llm::shared::auth::apply_auth;
+use crate::llm::shared::http::{
+    build_http_client_with, format_reqwest_error, safe_preview, send_error,
+};
+use crate::llm::LlmChunk;
 use futures::StreamExt;
 use reqwest::{
     Client, Response,
@@ -10,6 +15,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+const LABEL: &str = "JEV";
 const MAX_RESPONSE_SIZE: usize = 1024 * 1024;
 const MAX_OVERLOAD_RETRIES: usize = 3;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
@@ -205,7 +211,11 @@ async fn read_success_body(
         };
         let Some(chunk) = chunk else { break };
         let chunk = chunk.map_err(|error| {
-            ReadOutcome::Failed(format_reqwest_error("读取 JEV 响应失败", &error, api_key))
+            ReadOutcome::Failed(format_reqwest_error(
+                &format!("读取 {LABEL} 响应失败"),
+                &error,
+                api_key,
+            ))
         })?;
         if bytes.len() + chunk.len() > MAX_RESPONSE_SIZE {
             return Err(ReadOutcome::Failed(format!(
@@ -232,16 +242,10 @@ pub struct JevClient {
 }
 
 impl JevClient {
-    pub fn new(config: &OpenAiConfig) -> Self {
-        let http = Client::builder()
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .read_timeout(JEV_READ_TIMEOUT)
-            .timeout(JEV_TOTAL_TIMEOUT)
-            .build()
-            .expect("创建 HTTP 客户端失败");
+    pub fn new(config: &LlmConfig) -> Self {
         Self {
-            http,
-            endpoint: config.base_url.trim_end_matches('/').to_string(),
+            http: build_http_client_with(JEV_READ_TIMEOUT, JEV_TOTAL_TIMEOUT),
+            endpoint: endpoint(Protocol::Jev, &config.base_url, &config.model),
             model: config.model.clone(),
             api_key: config.api_key.clone(),
         }
@@ -249,24 +253,27 @@ impl JevClient {
 
     pub fn ask(
         &self,
-        question: &str,
-        options: &[String],
-        categories: &[String],
+        request: &QuizRequest,
         tx: mpsc::UnboundedSender<LlmChunk>,
         token: CancellationToken,
     ) {
-        if options.is_empty() {
+        if request.options.is_empty() {
             send_error(&tx, &self.api_key, "JEV 无法作答：题目没有可选项");
             return;
         }
 
-        let body = build_request_body(&self.model, question, options, categories);
+        let body = build_request_body(
+            &self.model,
+            request.question,
+            request.options,
+            request.categories,
+        );
         tracing::info!("JEV request:\n{}", body);
 
         let endpoint = self.endpoint.clone();
         let http = self.http.clone();
         let api_key = self.api_key.clone();
-        let option_count = options.len();
+        let option_count = request.options.len();
 
         tokio::spawn(async move {
             if token.is_cancelled() {
@@ -278,22 +285,23 @@ impl JevClient {
                 let response = tokio::select! {
                     biased;
                     _ = token.cancelled() => return,
-                    result = http
-                        .post(&endpoint)
-                        .header(CONTENT_TYPE, "application/json")
-                        .header("Authorization", format!("Bearer {api_key}"))
-                        .json(&body)
-                        .send() => match result {
-                            Ok(response) => response,
-                            Err(error) => {
-                                send_error(
-                                    &tx,
-                                    &api_key,
-                                    format_reqwest_error("JEV 请求失败", &error, &api_key),
-                                );
-                                return;
-                            }
+                    result = apply_auth(
+                        http.post(&endpoint).header(CONTENT_TYPE, "application/json"),
+                        Protocol::Jev,
+                        &api_key,
+                    )
+                    .json(&body)
+                    .send() => match result {
+                        Ok(response) => response,
+                        Err(error) => {
+                            send_error(
+                                &tx,
+                                &api_key,
+                                format_reqwest_error("JEV 请求失败", &error, &api_key),
+                            );
+                            return;
                         }
+                    }
                 };
 
                 let status = response.status();

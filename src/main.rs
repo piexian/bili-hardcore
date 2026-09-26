@@ -9,7 +9,7 @@ mod ui;
 
 use app::App;
 use clap::Parser;
-use config::OpenAiConfig;
+use config::LlmConfig;
 use crossterm::{
     event::{self, Event, EventStream},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
@@ -83,14 +83,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli_config = match (cli.url, cli.model, cli.api_key) {
-        (Some(url), Some(model), Some(key)) => Some(OpenAiConfig {
-            base_url: url.trim_end_matches('/').to_string(),
-            model,
-            api_key: key,
-            enable_thinking: false,
-            reasoning_effort: "high".to_string(),
-            enable_fast_mode: false,
-        }),
+        (Some(url), Some(model), Some(key)) => {
+            // CLI 只给 URL：先按原地址推断协议，再归一成基址。
+            let (protocol, base_url) = llm::protocol::resolve(&url);
+            Some(LlmConfig {
+                base_url,
+                model,
+                api_key: key,
+                protocol: Some(protocol),
+                enable_thinking: false,
+                reasoning_effort: "high".to_string(),
+                enable_fast_mode: false,
+            })
+        }
         _ => None,
     };
 

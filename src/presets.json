@@ -1,49 +1,81 @@
 [
     {
-        "provider": "siliconflow",
+        "protocol": "openai_chat",
         "provider_name": "硅基流动",
         "config": {
-            "base_url": "https://api.siliconflow.cn/v1/chat/completions",
+            "base_url": "https://api.siliconflow.cn/v1",
             "model": "deepseek-ai/DeepSeek-V4-Flash"
         }
     },
     {
-        "provider": "deepseek",
+        "protocol": "openai_chat",
         "provider_name": "DeepSeek",
         "config": {
-            "base_url": "https://api.deepseek.com/v1/chat/completions",
+            "base_url": "https://api.deepseek.com/v1",
             "model": "deepseek-v4-flash"
         }
     },
     {
-        "provider": "zai",
+        "protocol": "openai_chat",
         "provider_name": "智谱",
         "config": {
-            "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
             "model": "glm-4.7"
         }
     },
     {
-        "provider": "openai",
+        "protocol": "openai_chat",
         "provider_name": "OpenAI",
         "config": {
-            "base_url": "https://api.openai.com/v1/chat/completions",
+            "base_url": "https://api.openai.com/v1",
             "model": "gpt-5.4-nano"
         }
     },
     {
-        "provider": "grok",
+        "protocol": "openai_responses",
+        "provider_name": "OpenAI (Responses)",
+        "config": {
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-5.4-nano"
+        }
+    },
+    {
+        "protocol": "claude",
+        "provider_name": "Claude (Anthropic)",
+        "config": {
+            "base_url": "https://api.anthropic.com/v1",
+            "model": "claude-sonnet-5"
+        }
+    },
+    {
+        "protocol": "gemini",
+        "provider_name": "Gemini 3",
+        "config": {
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "model": "gemini-3-flash-preview"
+        }
+    },
+    {
+        "protocol": "gemini_interactions",
+        "provider_name": "Gemini 3 (Interactions)",
+        "config": {
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "model": "gemini-3.8-flash"
+        }
+    },
+    {
+        "protocol": "openai_responses",
         "provider_name": "Grok (xAI)",
         "config": {
-            "base_url": "https://api.x.ai/v1/chat/completions",
+            "base_url": "https://api.x.ai/v1",
             "model": "grok-4.6"
         }
     },
     {
-        "provider": "jev",
+        "protocol": "jev",
         "provider_name": "JEV (TypeSafe)",
         "config": {
-            "base_url": "https://api.typesafe.ai/v1/systemone",
+            "base_url": "https://api.typesafe.ai/v1",
             "model": "jev-latest"
         }
     }

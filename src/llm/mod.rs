@@ -1,41 +1,68 @@
-pub(crate) mod http;
-pub mod jev;
-pub mod openai;
+pub mod models;
+pub(crate) mod protocol;
+pub mod prompt;
+pub(crate) mod providers;
+mod request;
+pub(crate) mod shared;
 
-use crate::config::OpenAiConfig;
+pub use protocol::{Protocol, supports_thinking};
+pub use request::QuizRequest;
+
+use crate::config::LlmConfig;
+use providers::{
+    ClaudeClient, GeminiClient, GeminiInteractionsClient, JevClient, OpenAiChatClient,
+    OpenAiResponsesClient,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub use jev::{JevClient, is_jev_endpoint};
-pub use openai::{LlmChunk, OpenAiClient};
+/// 适配器与 UI 之间的唯一契约：各协议把流式响应翻译成这四个事件，
+/// 界面与答题状态机不需要知道任何协议细节。
+#[derive(Debug)]
+pub enum LlmChunk {
+    Thinking(String),
+    Content(String),
+    Done(String),
+    Error(String),
+}
 
-/// JEV 不是对话模型：它只提供 /v1/systemone 的结构化决策接口，
-/// 因此与 OpenAI 兼容的 Chat Completions 是两套协议，按 base_url 分流。
+/// 协议分派。配置显式选择协议；旧配置缺该字段时按基址推断。
 pub enum LlmClient {
-    OpenAi(OpenAiClient),
+    OpenAiChat(OpenAiChatClient),
+    OpenAiResponses(OpenAiResponsesClient),
+    Claude(ClaudeClient),
+    Gemini(GeminiClient),
+    GeminiInteractions(GeminiInteractionsClient),
     Jev(JevClient),
 }
 
 impl LlmClient {
-    pub fn new(config: &OpenAiConfig) -> Self {
-        if is_jev_endpoint(&config.base_url) {
-            Self::Jev(JevClient::new(config))
-        } else {
-            Self::OpenAi(OpenAiClient::new(config))
+    pub fn new(config: &LlmConfig) -> Self {
+        match config.protocol() {
+            Protocol::OpenAiChat => Self::OpenAiChat(OpenAiChatClient::new(config)),
+            Protocol::OpenAiResponses => Self::OpenAiResponses(OpenAiResponsesClient::new(config)),
+            Protocol::Claude => Self::Claude(ClaudeClient::new(config)),
+            Protocol::Gemini => Self::Gemini(GeminiClient::new(config)),
+            Protocol::GeminiInteractions => {
+                Self::GeminiInteractions(GeminiInteractionsClient::new(config))
+            }
+            Protocol::Jev => Self::Jev(JevClient::new(config)),
         }
     }
 
     pub fn ask(
         &self,
-        question: &str,
-        options: &[String],
-        categories: &[String],
+        request: &QuizRequest,
         tx: mpsc::UnboundedSender<LlmChunk>,
         token: CancellationToken,
     ) {
         match self {
-            Self::OpenAi(client) => client.ask_stream(question, options, categories, tx, token),
-            Self::Jev(client) => client.ask(question, options, categories, tx, token),
+            Self::OpenAiChat(client) => client.ask(request, tx, token),
+            Self::OpenAiResponses(client) => client.ask(request, tx, token),
+            Self::Claude(client) => client.ask(request, tx, token),
+            Self::Gemini(client) => client.ask(request, tx, token),
+            Self::GeminiInteractions(client) => client.ask(request, tx, token),
+            Self::Jev(client) => client.ask(request, tx, token),
         }
     }
 }

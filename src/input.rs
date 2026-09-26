@@ -1,5 +1,6 @@
 use crate::app::*;
-use crate::config::{self, OpenAiConfig};
+use crate::config::{self, LlmConfig};
+use crate::llm::protocol::normalize_base;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::app::CaptchaFocus;
@@ -39,6 +40,12 @@ impl App {
     }
 
     fn key_config(&mut self, code: KeyCode) {
+        // Model picker overlay takes over all keys
+        if self.model_picker_open {
+            self.key_model_picker(code);
+            return;
+        }
+
         // Handle preset selection overlay when active
         if self.cfg_preset_open {
             let presets = config::load_presets();
@@ -58,6 +65,8 @@ impl App {
                         self.cfg_fields[1] = preset.config.model.clone();
                         self.cfg_cursors[0] = self.cfg_fields[0].len();
                         self.cfg_cursors[1] = self.cfg_fields[1].len();
+                        // 预设同时决定协议，基址相同的服务可能对应不同协议。
+                        self.cfg_protocol = preset.protocol;
                     }
                     self.cfg_preset_open = false;
                 }
@@ -95,7 +104,8 @@ impl App {
             ConfigFocus::BaseUrl => Some(0),
             ConfigFocus::Model => Some(1),
             ConfigFocus::ApiKey => Some(2),
-            ConfigFocus::ThinkingToggle
+            ConfigFocus::Protocol
+            | ConfigFocus::ThinkingToggle
             | ConfigFocus::ThinkingEffort
             | ConfigFocus::FastModeToggle
             | ConfigFocus::SaveBtn
@@ -110,6 +120,11 @@ impl App {
                 ConfigFocus::ResetBtn => {
                     self.config_confirm_reset = true;
                     self.config_reset_choice = 0;
+                }
+                ConfigFocus::Protocol => self.cfg_protocol = self.cfg_protocol.next(),
+                ConfigFocus::Model => {
+                    self.model_picker_open = true;
+                    self.spawn_fetch_models();
                 }
                 ConfigFocus::ThinkingToggle => self.cfg_thinking = !self.cfg_thinking,
                 ConfigFocus::ThinkingEffort => self.cfg_effort = (self.cfg_effort + 1) % 3,
@@ -132,6 +147,8 @@ impl App {
             KeyCode::Left => {
                 if self.cfg_focus == ConfigFocus::ThinkingEffort {
                     self.cfg_effort = (self.cfg_effort + 2) % 3; // decrement with wrap
+                } else if self.cfg_focus == ConfigFocus::Protocol {
+                    self.cfg_protocol = self.cfg_protocol.previous();
                 } else if let Some(idx) = field_idx
                     && self.cfg_cursors[idx] > 0
                 {
@@ -141,6 +158,8 @@ impl App {
             KeyCode::Right => {
                 if self.cfg_focus == ConfigFocus::ThinkingEffort {
                     self.cfg_effort = (self.cfg_effort + 1) % 3;
+                } else if self.cfg_focus == ConfigFocus::Protocol {
+                    self.cfg_protocol = self.cfg_protocol.next();
                 } else if let Some(idx) = field_idx
                     && self.cfg_cursors[idx] < self.cfg_fields[idx].len()
                 {
@@ -151,9 +170,16 @@ impl App {
                 self.cfg_focus = match self.cfg_focus {
                     ConfigFocus::BaseUrl => ConfigFocus::Model,
                     ConfigFocus::Model => ConfigFocus::ApiKey,
-                    ConfigFocus::ApiKey => ConfigFocus::ThinkingToggle,
+                    ConfigFocus::ApiKey => ConfigFocus::Protocol,
+                    ConfigFocus::Protocol => {
+                        if self.thinking_visible() {
+                            ConfigFocus::ThinkingToggle
+                        } else {
+                            ConfigFocus::FastModeToggle
+                        }
+                    }
                     ConfigFocus::ThinkingToggle => {
-                        if self.cfg_thinking {
+                        if self.thinking_visible() {
                             ConfigFocus::ThinkingEffort
                         } else {
                             ConfigFocus::FastModeToggle
@@ -171,26 +197,29 @@ impl App {
                     ConfigFocus::BaseUrl => ConfigFocus::ResetBtn,
                     ConfigFocus::Model => ConfigFocus::BaseUrl,
                     ConfigFocus::ApiKey => ConfigFocus::Model,
+                    ConfigFocus::Protocol => ConfigFocus::ApiKey,
                     ConfigFocus::FastModeToggle => {
-                        if self.cfg_thinking {
+                        if self.thinking_visible() {
                             ConfigFocus::ThinkingEffort
                         } else {
                             ConfigFocus::ThinkingToggle
                         }
                     }
                     ConfigFocus::ThinkingEffort => ConfigFocus::ThinkingToggle,
-                    ConfigFocus::ThinkingToggle => ConfigFocus::ApiKey,
+                    ConfigFocus::ThinkingToggle => ConfigFocus::Protocol,
                     ConfigFocus::SaveBtn => ConfigFocus::FastModeToggle,
                     ConfigFocus::TemplateBtn => ConfigFocus::SaveBtn,
                     ConfigFocus::ResetBtn => ConfigFocus::TemplateBtn,
                 };
             }
             KeyCode::Char(' ')
-                if self.cfg_focus == ConfigFocus::ThinkingToggle
+                if self.cfg_focus == ConfigFocus::Protocol
+                    || self.cfg_focus == ConfigFocus::ThinkingToggle
                     || self.cfg_focus == ConfigFocus::ThinkingEffort
                     || self.cfg_focus == ConfigFocus::FastModeToggle =>
             {
                 match self.cfg_focus {
+                    ConfigFocus::Protocol => self.cfg_protocol = self.cfg_protocol.next(),
                     ConfigFocus::ThinkingToggle => self.cfg_thinking = !self.cfg_thinking,
                     ConfigFocus::ThinkingEffort => self.cfg_effort = (self.cfg_effort + 1) % 3,
                     ConfigFocus::FastModeToggle => self.cfg_fast_mode = !self.cfg_fast_mode,
@@ -206,6 +235,56 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// 模型选择器：打字即过滤，Esc 先清过滤再关闭。
+    fn key_model_picker(&mut self, code: KeyCode) {
+        let count = self.filtered_models().len();
+        match code {
+            KeyCode::Esc => {
+                if self.model_filter.is_empty() {
+                    self.model_picker_open = false;
+                } else {
+                    self.model_filter.clear();
+                    self.model_cursor = 0;
+                }
+            }
+            KeyCode::Enter => {
+                // 还在拉取或没有匹配项时，Enter 不关覆盖层，避免白按一次就没了。
+                if let Some(model) = self.filtered_models().get(self.model_cursor) {
+                    self.cfg_fields[1] = model.id.clone();
+                    self.cfg_cursors[1] = self.cfg_fields[1].len();
+                    self.model_picker_open = false;
+                }
+            }
+            KeyCode::Up => {
+                self.model_cursor = self.model_cursor.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if count > 0 {
+                    self.model_cursor = (self.model_cursor + 1).min(count - 1);
+                }
+            }
+            KeyCode::Left => {
+                self.model_cursor = self.model_cursor.saturating_sub(App::MODELS_PER_PAGE);
+            }
+            KeyCode::Right => {
+                if count > 0 {
+                    self.model_cursor =
+                        (self.model_cursor + App::MODELS_PER_PAGE).min(count - 1);
+                }
+            }
+            KeyCode::Backspace => {
+                self.model_filter.pop();
+                self.model_cursor = 0;
+            }
+            KeyCode::Char(character) => {
+                self.model_filter.push(character);
+                self.model_cursor = 0;
+            }
+            _ => {}
+        }
+        self.clamp_model_cursor();
     }
 
     fn key_quiz(&mut self, key: crossterm::event::KeyEvent) {
@@ -433,6 +512,7 @@ impl App {
         let is_first_time = self.config.is_none();
         if let Some(ref c) = self.config {
             self.cfg_fields = [c.base_url.clone(), c.model.clone(), c.api_key.clone()];
+            self.cfg_protocol = c.protocol();
         }
         self.cfg_cursors = [
             self.cfg_fields[0].len(),
@@ -449,20 +529,22 @@ impl App {
     }
 
     fn save_config(&mut self) {
-        let base = self.cfg_fields[0].trim_end_matches('/').to_string();
+        let base = normalize_base(&self.cfg_fields[0]);
         let model = self.cfg_fields[1].clone();
         let key = self.cfg_fields[2].clone();
         if base.is_empty() || model.is_empty() || key.is_empty() {
             return;
         }
-        let cfg = OpenAiConfig {
+        let cfg = LlmConfig {
             base_url: base,
             model,
             api_key: key,
+            protocol: Some(self.cfg_protocol),
             enable_thinking: self.cfg_thinking,
             reasoning_effort: ["low", "high", "max"][self.cfg_effort].to_string(),
             enable_fast_mode: self.cfg_fast_mode,
         };
+        self.cfg_fields[0] = cfg.base_url.clone();
         let _ = crate::config::save_openai_config(&cfg).map_err(|e| tracing::error!("{}", e));
         self.config = Some(cfg);
         self.back();

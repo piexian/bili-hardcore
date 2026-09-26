@@ -1,6 +1,8 @@
 use crate::api::BiliClient;
-use crate::config::{self, AuthData, OpenAiConfig};
-use crate::llm::LlmChunk;
+use crate::config::{self, AuthData, LlmConfig};
+use crate::llm::models::{self, ModelEntry, ModelList};
+use crate::llm::protocol::normalize_base;
+use crate::llm::{LlmChunk, Protocol, QuizRequest};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +28,7 @@ pub enum ConfigFocus {
     BaseUrl,
     Model,
     ApiKey,
+    Protocol,
     ThinkingToggle,
     ThinkingEffort,
     FastModeToggle,
@@ -127,6 +130,8 @@ pub enum AppEvent {
         image_bytes: Option<Vec<u8>>,
     },
     LlmChunk(LlmChunk),
+    ModelsLoaded(ModelList),
+    ModelsFailed(String),
     LlmRetry {
         reason: String,
     },
@@ -175,6 +180,8 @@ pub struct App {
     pub cfg_fields: [String; 3],
     pub cfg_focus: ConfigFocus,
     pub cfg_cursors: [usize; 3],
+    /// 目标协议：基址只到 `v1` 之前，Chat 与 Responses 同域，必须显式区分。
+    pub cfg_protocol: Protocol,
     pub cfg_thinking: bool,
     /// 思考强度档位索引：0=low 1=high 2=max
     pub cfg_effort: usize,
@@ -183,6 +190,17 @@ pub struct App {
     pub config_reset_choice: u8,
     pub cfg_preset_open: bool,
     pub cfg_preset_sel: usize,
+
+    // Model picker (拉取 /v1/models 后本地分页与搜索)
+    pub model_picker_open: bool,
+    pub models: Vec<ModelEntry>,
+    pub models_loading: bool,
+    pub models_error: Option<String>,
+    /// 命中条数上限被截断，界面要提示还有更多。
+    pub models_truncated: bool,
+    pub model_filter: String,
+    /// 过滤后列表内的下标，页码由它推出，不单独存避免不同步。
+    pub model_cursor: usize,
 
     // Quiz state
     pub phase: QuizPhase,
@@ -201,7 +219,7 @@ pub struct App {
     pub answer_text: String,
 
     // Shared
-    pub config: Option<OpenAiConfig>,
+    pub config: Option<LlmConfig>,
     pub auth: Option<AuthData>,
     pub tx: mpsc::UnboundedSender<AppEvent>,
     pub rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -231,8 +249,70 @@ impl App {
     /// LLM 单题最大重试次数（不含首次请求）。
     pub const MAX_LLM_RETRIES: u32 = 3;
 
+    /// 模型选择器每页展示的条数。
+    pub const MODELS_PER_PAGE: usize = models::MODELS_PER_PAGE;
+
+    /// 思考开关是否参与导航：JEV 没有思考开关，整行都不出现。
+    pub fn thinking_visible(&self) -> bool {
+        self.cfg_thinking && crate::llm::supports_thinking(self.cfg_protocol)
+    }
+
+    /// 搜索按 id 和展示名同时匹配，大小写无关。
+    pub fn filtered_models(&self) -> Vec<&ModelEntry> {
+        models::filter_models(&self.models, &self.model_filter)
+    }
+
+    pub fn model_page(&self) -> usize {
+        self.model_cursor / Self::MODELS_PER_PAGE
+    }
+
+    pub fn model_page_count(&self) -> usize {
+        models::page_count(self.filtered_models().len())
+    }
+
+    /// 过滤条件变化后光标可能落在列表之外。
+    pub fn clamp_model_cursor(&mut self) {
+        let count = self.filtered_models().len();
+        if count == 0 {
+            self.model_cursor = 0;
+        } else if self.model_cursor >= count {
+            self.model_cursor = count - 1;
+        }
+    }
+
+    /// 用配置页里尚未保存的输入拉模型列表，填完 Key 不用先保存就能选。
+    pub fn spawn_fetch_models(&mut self) {
+        let base_url = normalize_base(&self.cfg_fields[0]);
+        let api_key = self.cfg_fields[2].trim().to_string();
+        self.models = Vec::new();
+        self.model_filter.clear();
+        self.model_cursor = 0;
+        self.models_truncated = false;
+        self.models_error = None;
+
+        if base_url.is_empty() || api_key.is_empty() {
+            self.models_loading = false;
+            self.models_error = Some("请先填写 API 地址与 API Key".to_string());
+            return;
+        }
+
+        self.models_loading = true;
+        let protocol = self.cfg_protocol;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match models::fetch_models(protocol, &base_url, &api_key).await {
+                Ok(list) => {
+                    let _ = tx.send(AppEvent::ModelsLoaded(list));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::ModelsFailed(message));
+                }
+            }
+        });
+    }
+
     pub fn new(
-        cli_config: Option<OpenAiConfig>,
+        cli_config: Option<LlmConfig>,
         captcha_picker: Option<ratatui_image::picker::Picker>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -280,6 +360,10 @@ impl App {
             ],
             cfg_focus: ConfigFocus::BaseUrl,
             cfg_fields,
+            cfg_protocol: config
+                .as_ref()
+                .map(|config| config.protocol())
+                .unwrap_or_default(),
             cfg_thinking: config.as_ref().is_none_or(|c| c.enable_thinking),
             cfg_effort: config
                 .as_ref()
@@ -295,6 +379,13 @@ impl App {
             config_reset_choice: 0,
             cfg_preset_open: false,
             cfg_preset_sel: 0,
+            model_picker_open: false,
+            models: Vec::new(),
+            models_loading: false,
+            models_error: None,
+            models_truncated: false,
+            model_filter: String::new(),
+            model_cursor: 0,
             phase: QuizPhase::NotConfigured,
             score: 0,
             question_id: 0,
@@ -350,12 +441,19 @@ impl App {
         self.bili = BiliClient::new();
         self.cfg_fields = [String::new(), String::new(), String::new()];
         self.cfg_cursors = [0, 0, 0];
+        self.cfg_protocol = Protocol::default();
         self.cfg_thinking = true;
         self.cfg_effort = 1;
         self.config_confirm_reset = false;
         self.config_reset_choice = 0;
         self.cfg_preset_open = false;
         self.cfg_preset_sel = 0;
+        self.model_picker_open = false;
+        self.models.clear();
+        self.models_error = None;
+        self.models_truncated = false;
+        self.model_filter.clear();
+        self.model_cursor = 0;
         self.back();
     }
 
@@ -633,16 +731,15 @@ impl App {
         let token = self.quiz_token.clone();
         let client = crate::llm::LlmClient::new(cfg);
         let options: Vec<String> = self.answers.iter().map(|a| a.text.clone()).collect();
+        let request = QuizRequest {
+            question: &self.question_text,
+            options: &options,
+            categories: &self.selected_categories,
+        };
         let (llm_tx, mut llm_rx) = mpsc::unbounded_channel::<LlmChunk>();
         let tx = self.tx.clone();
 
-        client.ask(
-            &self.question_text,
-            &options,
-            &self.selected_categories,
-            llm_tx,
-            token.clone(),
-        );
+        client.ask(&request, llm_tx, token.clone());
 
         tokio::spawn(async move {
             while let Some(chunk) = llm_rx.recv().await {
@@ -805,9 +902,22 @@ impl App {
                 | AppEvent::SubmitFail(_)
                 | AppEvent::QuizDone { .. }
                 | AppEvent::Fail(_) => return,
+                // 模型列表与答题无关，退到别的页面也要接收，否则加载状态卡住。
+                AppEvent::ModelsLoaded(_) | AppEvent::ModelsFailed(_) => {}
             }
         }
         match ev {
+            AppEvent::ModelsLoaded(list) => {
+                self.models_loading = false;
+                self.models_error = None;
+                self.models_truncated = list.truncated;
+                self.models = list.models;
+                self.model_cursor = 0;
+            }
+            AppEvent::ModelsFailed(message) => {
+                self.models_loading = false;
+                self.models_error = Some(message);
+            }
             AppEvent::TicketReady(ticket) => {
                 self.bili.set_ticket(&ticket);
             }

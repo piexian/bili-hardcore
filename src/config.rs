@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::llm::protocol::{self, Protocol};
+
 const CONFIG_DIR_NAME: &str = ".bili-hardcore";
 
 // --- Preset Templates ---
@@ -15,7 +17,8 @@ pub struct PresetConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetTemplate {
-    pub provider: String,
+    /// 选择预设即选定协议，请求形态随之确定。
+    pub protocol: Protocol,
     pub provider_name: String,
     pub config: PresetConfig,
 }
@@ -26,11 +29,17 @@ pub fn load_presets() -> Vec<PresetTemplate> {
     serde_json::from_str(PRESETS_JSON).unwrap_or_default()
 }
 
+/// LLM 连接配置。落盘文件名仍是历史遗留的 `openai_config.json`，
+/// 现在覆盖全部协议，故以 LlmConfig 命名。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenAiConfig {
+pub struct LlmConfig {
+    /// 只存基址（`v1` 之前那节），完整端点由协议拼装。
     pub base_url: String,
     pub model: String,
     pub api_key: String,
+    /// 历史配置没有该字段，加载时按基址推断。
+    #[serde(default)]
+    pub protocol: Option<Protocol>,
     #[serde(default)]
     pub enable_thinking: bool,
     /// 思考模式强度（DeepSeek: low/high/max），默认 high
@@ -38,6 +47,14 @@ pub struct OpenAiConfig {
     pub reasoning_effort: String,
     #[serde(default)]
     pub enable_fast_mode: bool,
+}
+
+impl LlmConfig {
+    /// 显式选择的协议优先，缺失则按基址推断，兼容旧配置。
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+            .unwrap_or_else(|| protocol::infer_protocol(&self.base_url))
+    }
 }
 
 fn default_reasoning_effort() -> String {
@@ -76,17 +93,28 @@ pub fn ensure_config_dir() -> Result<()> {
 
 // --- OpenAI Config ---
 
-pub fn load_openai_config() -> Result<Option<OpenAiConfig>> {
+/// 旧配置迁移：按原始 URL 推断协议并归一成基址。
+fn migrate_legacy(mut config: LlmConfig) -> LlmConfig {
+    if config.protocol.is_none() {
+        let (inferred, base_url) = protocol::resolve(&config.base_url);
+        config.protocol = Some(inferred);
+        config.base_url = base_url;
+    }
+    config
+}
+
+pub fn load_openai_config() -> Result<Option<LlmConfig>> {
     let path = openai_config_path();
     if !path.exists() {
         return Ok(None);
     }
     let content = fs::read_to_string(&path).context("读取 API 配置失败")?;
-    let config: OpenAiConfig = serde_json::from_str(&content).context("解析 API 配置失败")?;
-    Ok(Some(config))
+    let config: LlmConfig = serde_json::from_str(&content).context("解析 API 配置失败")?;
+    // 旧配置存的是完整端点，读取时归一成基址，用户再次保存后即为新格式。
+    Ok(Some(migrate_legacy(config)))
 }
 
-pub fn save_openai_config(config: &OpenAiConfig) -> Result<()> {
+pub fn save_openai_config(config: &LlmConfig) -> Result<()> {
     ensure_config_dir()?;
     let path = openai_config_path();
     let content = serde_json::to_string_pretty(config).context("序列化 API 配置失败")?;
@@ -192,75 +220,122 @@ pub fn save_history(history: &[HistoryItem]) -> Result<()> {
     Ok(())
 }
 
-/// 把题干与选项拼成对话模型用的纯文本
-pub fn build_chat_prompt(question: &str, options: &[String]) -> String {
-    format!("题目:{}\n答案:{:?}", question, options)
-}
-
-/// 构建 LLM prompt
-pub fn build_quiz_prompt(categories: &[String], question: &str, enable_thinking: bool) -> String {
-    let cat_str = if categories.is_empty() {
-        "未知".to_string()
-    } else {
-        categories.join("、")
-    };
-    let base = format!(
-        "你是一个资深B站用户，目前正在完成硬核会员试炼考试，考试内容涉及的分区：[{}]，面对选择题时，直接根据问题和选项判断正确答案，并返回对应选项的序号（1, 2, 3, 4）。示例：\n\
-         问题：大的反义词是什么？\n\
-         选项：['长', '宽', '小', '热']\n\
-         回答：3\n\
-         如果不确定正确答案，选择最接近的选项序号返回，不提供额外解释或超出 1-4 的内容。",
-        cat_str
-    );
-    if enable_thinking {
-        format!("{}\n---\n{}", base, question)
-    } else {
-        format!("{}\n---\n不要思考，直接回答我的问题：{}", base, question)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn presets_json_parses() {
-        let presets: Vec<PresetTemplate> =
-            serde_json::from_str(PRESETS_JSON).expect("presets.json should parse");
+    fn presets_json_parses_and_every_base_carries_its_version() {
+        let presets = load_presets();
         assert!(!presets.is_empty());
+        for preset in &presets {
+            // 基址约定：写到版本段，适配器只追加端点路径。
+            let last = preset.config.base_url.rsplit('/').next().unwrap_or_default();
+            assert!(
+                protocol::versioned_base(preset.protocol, &preset.config.base_url)
+                    .ends_with(last),
+                "{} 的基址应已带版本段: {}",
+                preset.provider_name,
+                preset.config.base_url
+            );
+            assert!(!preset.config.model.trim().is_empty());
+        }
     }
 
     #[test]
-    fn grok_preset_is_unique_and_valid() {
+    fn every_protocol_has_at_least_one_preset() {
         let presets = load_presets();
-        let grok_presets: Vec<_> = presets
-            .iter()
-            .filter(|preset| preset.provider == "grok")
-            .collect();
-
-        assert_eq!(grok_presets.len(), 1);
-        let grok = grok_presets[0];
-        assert_eq!(grok.provider_name, "Grok (xAI)");
-        assert_eq!(grok.config.base_url, "https://api.x.ai/v1/chat/completions");
-        assert!(!grok.config.model.trim().is_empty());
+        for protocol in Protocol::ALL {
+            assert!(
+                presets.iter().any(|preset| preset.protocol == protocol),
+                "{protocol:?} 缺少预设"
+            );
+        }
     }
 
     #[test]
-    fn jev_preset_is_unique_and_routes_to_the_native_client() {
+    fn presets_build_their_documented_endpoints() {
         let presets = load_presets();
-        let jev_presets: Vec<_> = presets
-            .iter()
-            .filter(|preset| preset.provider == "jev")
-            .collect();
+        let by_name = |name: &str| {
+            presets
+                .iter()
+                .find(|preset| preset.provider_name == name)
+                .unwrap_or_else(|| panic!("缺少预设 {name}"))
+        };
 
-        assert_eq!(jev_presets.len(), 1);
-        let jev = jev_presets[0];
-        assert_eq!(jev.provider_name, "JEV (TypeSafe)");
-        assert_eq!(jev.config.base_url, "https://api.typesafe.ai/v1/systemone");
-        assert_eq!(jev.config.model, "jev-latest");
-        assert!(
-            crate::llm::is_jev_endpoint(&jev.config.base_url),
-            "预设 URL 必须能被识别为 JEV 端点，否则会退回 Chat Completions 协议"
+        let jev = by_name("JEV (TypeSafe)");
+        assert_eq!(jev.protocol, Protocol::Jev);
+        assert_eq!(
+            protocol::infer_protocol(&jev.config.base_url),
+            Protocol::Jev,
+            "预设基址必须能被识别为 JEV 端点"
         );
+
+        let gemini = by_name("Gemini 3");
+        assert_eq!(gemini.protocol, Protocol::Gemini);
+        assert!(
+            protocol::endpoint(Protocol::Gemini, &gemini.config.base_url, &gemini.config.model)
+                .ends_with(":streamGenerateContent?alt=sse"),
+            "Gemini 预设应拼出 SSE 流式端点"
+        );
+    }
+
+    #[test]
+    fn legacy_config_without_protocol_resolves_by_base_url() {
+        let legacy = serde_json::json!({
+            "base_url": "https://api.typesafe.ai/v1/systemone",
+            "model": "jev-latest",
+            "api_key": "k"
+        });
+        let config: LlmConfig = serde_json::from_value(legacy).expect("旧配置应可解析");
+        assert_eq!(config.protocol, None);
+        assert_eq!(config.protocol(), Protocol::Jev);
+        assert_eq!(
+            protocol::normalize_base(&config.base_url),
+            "https://api.typesafe.ai"
+        );
+
+        let chat = serde_json::json!({
+            "base_url": "https://api.x.ai/v1/chat/completions",
+            "model": "grok-4.6",
+            "api_key": "k"
+        });
+        let config: LlmConfig = serde_json::from_value(chat).expect("旧配置应可解析");
+        assert_eq!(config.protocol(), Protocol::OpenAiChat);
+        assert_eq!(
+            protocol::endpoint(Protocol::OpenAiChat, &config.base_url, &config.model),
+            "https://api.x.ai/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn legacy_jev_relay_keeps_the_jev_protocol() {
+        // 走中转的 JEV：端点特征在 /systemone 上，先归一再推断会退化成 Chat Completions。
+        let legacy = serde_json::json!({
+            "base_url": "http://192.168.0.2:3000/v1/systemone",
+            "model": "jev-1.13.0",
+            "api_key": "k"
+        });
+        let config = migrate_legacy(serde_json::from_value(legacy).expect("旧配置应可解析"));
+        assert_eq!(config.protocol(), Protocol::Jev);
+        assert_eq!(config.base_url, "http://192.168.0.2:3000");
+        assert_eq!(
+            protocol::endpoint(Protocol::Jev, &config.base_url, &config.model),
+            "http://192.168.0.2:3000/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn explicit_protocol_wins_over_url_inference() {
+        let config = LlmConfig {
+            base_url: "https://relay.example.com".to_string(),
+            model: "m".to_string(),
+            api_key: "k".to_string(),
+            protocol: Some(Protocol::Claude),
+            enable_thinking: true,
+            reasoning_effort: "high".to_string(),
+            enable_fast_mode: false,
+        };
+        assert_eq!(config.protocol(), Protocol::Claude);
     }
 }
